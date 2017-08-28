@@ -19,7 +19,6 @@
 
 // for lack of better name, "serial" is the type of interface exposed by qmi_wwan, and "socket" is the socket exposed by qmuxd.
 // the qmuxd transaction id is wider than the serial one, so we pass it through with casting, and don't need to have our own bookkeeping
-// TODO probably change names to "serial" and "qmuxd". socket_qmuxd_ is long - on the other hand we need all the help we can get distinguishing "qmux" and "qmuxd"
 // TODO check if stuff like indications work
 
 /*
@@ -62,21 +61,21 @@ typedef int err_t;
 
 #define IOV(base, len) { .iov_base = (base), .iov_len = (len) }
 
-struct serial_qmux {
+struct serial_hdr {
 	uint16_t len;
 	uint8_t flags;
 	uint8_t service;
 	uint8_t client;
 } __packed;
 
-struct common_qmi_ctl { // format is common between serial and socket
+struct qmi_ctl { // format is common between serial and socket
 	uint8_t flags;
 	uint8_t transaction;
 	uint16_t message;
 	uint16_t payload_len;
 } __packed;
 
-struct common_qmi_svc { // format is common between serial and socket
+struct qmi_svc { // format is common between serial and socket
 	uint8_t flags;
 	uint16_t transaction;
 	uint16_t message;
@@ -84,11 +83,11 @@ struct common_qmi_svc { // format is common between serial and socket
 } __packed;
 
 union qmi_ctl_or_svc {
-	struct common_qmi_ctl ctl;
-	struct common_qmi_svc svc;
+	struct qmi_ctl ctl;
+	struct qmi_svc svc;
 };
 
-struct socket_qmuxd_hdr { // from Gobi API struct sQMUXDHeader
+struct qmuxd_hdr { // from Gobi API struct sQMUXDHeader
 	uint32_t len;
 	uint32_t qmuxd_client; // qmuxd logs and Harald Welte's structs call this and the above members the "platform header"
 	uint32_t message;
@@ -115,71 +114,78 @@ int g_qmuxd_socket;
 uint32_t g_qmuxd_client_id;
 int g_serialfd;
 
-err_t write_socket_msg(const struct socket_qmuxd_hdr *msg, const struct iovec payloadvec[2]);
-err_t read_socket_msg(struct socket_qmuxd_hdr *msg, uint8_t *payload, size_t payload_buf_size);
+err_t read_qmuxd_msg(struct qmuxd_hdr *hdr, uint8_t *payload, size_t payload_buf_size);
+err_t read_serial_msg(struct serial_hdr *hdr, union qmi_ctl_or_svc *msg, uint8_t *payload, size_t payload_buf_size);
 
-err_t
-read_serial_msg(struct serial_qmux *qmux, union qmi_ctl_or_svc *msg, uint8_t *payload, size_t payload_buf_size);
+bool_t writeall(int fd, const void *buf, size_t len) ;
+bool_t writevall(int fd, const struct iovec *iov, int iovcnt) ;
 
-err_t write_serial_response(struct serial_qmux *qmux, union qmi_ctl_or_svc *msg, const uint8_t *payload,
-							size_t payload_len) ;
+err_t send_qmuxd_request(struct serial_hdr *serial_hdr, union qmi_ctl_or_svc *msg, uint8_t *msg_payload) {
+	uint16_t transaction;
+	uint16_t message;
+	size_t msg_len;
+	uint16_t payload_len;
+	uint32_t qmuxd_msg;
 
-err_t handle_control_req(struct common_qmi_ctl *ctl, uint8_t *ctl_payload) {
-	LOG("[%"PRIu8"]< %"PRIu16, ctl->transaction, ctl->message);
-	struct socket_qmuxd_hdr socket_req = {
-			.len = sizeof(struct socket_qmuxd_hdr) + sizeof(*ctl) + ctl->payload_len,
-			.message = QMUXD_MSG_RAW_QMI_CTL, .transaction = ctl->transaction,
+#define EXTRACT(unionmember, qmuxdmsg) \
+	transaction = msg->unionmember.transaction; \
+	message = msg->unionmember.message; \
+	msg_len = sizeof(msg->unionmember); \
+	payload_len = msg->unionmember.payload_len; \
+	qmuxd_msg = qmuxdmsg;
+
+	if (serial_hdr->service == 0) {
+		EXTRACT(ctl, QMUXD_MSG_RAW_QMI_CTL);
+	} else {
+		EXTRACT(svc, QMUXD_MSG_WRITE_QMI_SDU);
+	}
+#undef EXTRACT
+
+	LOG("[%"PRIu16"]< %"PRIu16" %"PRIu16, transaction, serial_hdr->service, message);
+
+	struct qmuxd_hdr qmuxd_hdr = {
+			.len = sizeof(struct qmuxd_hdr) + msg_len + payload_len,
+			.message = qmuxd_msg, .transaction = transaction,
 			.qmuxd_client = g_qmuxd_client_id, .qmuxd_client_again = g_qmuxd_client_id,
+			.service = serial_hdr->service, .qmi_client = serial_hdr->client,
 	};
-	struct iovec payload[2] = {
-			{.iov_base = ctl, .iov_len = sizeof(*ctl) },
-			{.iov_base = ctl_payload, .iov_len = ctl->payload_len },
+
+	const struct iovec iov[] = {
+			IOV( &qmuxd_hdr, sizeof(qmuxd_hdr) ),
+			{ .iov_base = msg, .iov_len = msg_len},
+			{ .iov_base = msg_payload, .iov_len = payload_len},
 	};
-	return write_socket_msg(&socket_req, payload);
+
+	if (!writevall(g_qmuxd_socket, iov, sizeof(iov)/sizeof(iov[0]))) return errno;
+
+	return 0;
 }
 
-err_t handle_control_resp(const struct socket_qmuxd_hdr *qmuxd_resp, struct common_qmi_ctl *ctl_resp) {
-	// TODO check sys_err and qmi_err ?
-	LOG("[%"PRIu32"]< %"PRIu32" sys_err=%"PRIu32" qmi_err=%"PRIu32"",
-		qmuxd_resp->transaction, qmuxd_resp->message, qmuxd_resp->sys_err, qmuxd_resp->qmi_err);
+err_t handle_qmuxd_response(struct qmuxd_hdr *qmuxd_hdr, const uint8_t *payload) {
+	LOG("[%"PRIu16", syserr=%"PRIu32", qmierr=%"PRIu32"]< %"PRIu16" %"PRIu16, qmuxd_hdr->transaction, qmuxd_hdr->service, qmuxd_hdr->message,
+		qmuxd_hdr->sys_err, qmuxd_hdr->qmi_err);
 
-	LOG("[%"PRIu16"]:> %"PRIu16" payload=%"PRIu16, ctl_resp->transaction, ctl_resp->message, ctl_resp->payload_len);
-
-	struct serial_qmux qmux = {
-		.len = sizeof(struct serial_qmux) + sizeof(struct common_qmi_ctl) + ctl_resp->payload_len,
+	struct serial_hdr serial_hdr = {
+		.len = sizeof(serial_hdr) + (qmuxd_hdr->len - sizeof(*qmuxd_hdr)),
+		.service = truncate_to(uint8_t, qmuxd_hdr->service), .client = qmuxd_hdr->qmi_client,
+		.flags = 0x80 // oFono and GobiNet check for this value without naming it; probably means it's a response
 	};
-	return write_serial_response(&qmux, (union qmi_ctl_or_svc *) ctl_resp,
-								 ((void *) ctl_resp) + sizeof(struct common_qmi_ctl),
-								 ctl_resp->payload_len);
-}
 
-err_t handle_service_req(struct serial_qmux *serial_qmux, struct common_qmi_svc *svc, uint8_t *service_payload) {
-	LOG("[%"PRIu16"]< %"PRIu16" %"PRIu16, svc->transaction, serial_qmux->service, svc->message);
+	size_t payload_len = qmuxd_hdr->len - sizeof(*qmuxd_hdr);
 
-	struct socket_qmuxd_hdr qmuxd = {
-			.len = sizeof(struct socket_qmuxd_hdr) + sizeof(*svc) + svc->payload_len,
-			.message = QMUXD_MSG_WRITE_QMI_SDU, .transaction = svc->transaction,
-			.qmuxd_client = g_qmuxd_client_id, .qmuxd_client_again = g_qmuxd_client_id,
-			.service = serial_qmux->service, .qmi_client = serial_qmux->client,
-	};
-	struct iovec payloadvec[2] = {
-		{ .iov_base = svc, .iov_len = sizeof(*svc) },
-		{ .iov_base = service_payload, .iov_len = svc->payload_len },
-	};
-	return write_socket_msg(&qmuxd, payloadvec);
-}
+	// TODO writev() ?
+	uint8_t frame = 1;
+	if (!writeall(g_serialfd, &frame, sizeof(frame))) return errno;
+	if (!writeall(g_serialfd, &serial_hdr, sizeof(serial_hdr))) return errno;
+	if (payload_len) {
+		if (!payload) {
+			LOG("payload specified but not given");
+			return EINVAL;
+		}
+		if (!writeall(g_serialfd, payload, payload_len)) return errno;
+	}
 
-err_t handle_service_resp(struct socket_qmuxd_hdr *qmuxd_resp, const uint8_t *svc_resp) {
-	const struct common_qmi_svc *svc = (const struct common_qmi_svc *)svc_resp;
-	LOG("[%"PRIu16"]:> %"PRIu16, svc->transaction, svc->message);
-
-	const uint8_t *payload = &svc_resp[sizeof(*svc)];
-
-	struct serial_qmux qmux = {
-		.len = sizeof(struct serial_qmux) + sizeof(struct common_qmi_svc) + svc->payload_len,
-		.service = truncate_to(uint8_t, qmuxd_resp->service), .client = qmuxd_resp->qmi_client, .flags = 0x80 // oFono and GobiNet check for this value
-	};
-	return write_serial_response(&qmux, (union qmi_ctl_or_svc *) svc, payload, svc->payload_len);
+	return 0;
 }
 
 bool_t readall(int fd, void *buf, size_t len) {
@@ -217,113 +223,64 @@ bool_t writevall(int fd, const struct iovec *iov, int iovcnt) {
 
 void serial_read_loop() {
 	for (;;) {
-		struct serial_qmux qmux;
-		union qmi_ctl_or_svc serial_req;
+		struct serial_hdr hdr;
+		union qmi_ctl_or_svc msg;
 		uint8_t payload[MAX_QMI_MSG_SIZE];
-		err_t err = read_serial_msg(&qmux, &serial_req, payload, sizeof(payload));
+		err_t err = read_serial_msg(&hdr, &msg, payload, sizeof(payload));
 		if (err) {
 			LOG("error reading serial msg: %s", strerr_t(err));
 			return;
 		}
-		if (qmux.service == 0) {
-			if (handle_control_req(&serial_req.ctl, payload)) return;
-		} else {
-			if (handle_service_req(&qmux, &serial_req.svc, payload)) return;
-		}
+		if (send_qmuxd_request(&hdr, &msg, payload)) return;
 	}
 }
 
-void *socket_read_loop(void *arg __unused) {
+void *qmuxd_read_loop(void *_unused __unused) {
 	for (;;) {
-		struct socket_qmuxd_hdr socket_resp;
+		struct qmuxd_hdr hdr;
 		uint8_t payload[MAX_QMI_MSG_SIZE];
-		err_t err = read_socket_msg(&socket_resp, payload, sizeof(payload));
+		err_t err = read_qmuxd_msg(&hdr, payload, sizeof(payload));
 		if (err) {
 			LOG("error reading socket msg: %s", strerr_t(err));
 			return NULL;
 		}
-		if (socket_resp.service == 0 && socket_resp.message == QMUXD_MSG_WRITE_QMI_SDU) socket_resp.message = QMUXD_MSG_RAW_QMI_CTL; // XXX bug in qmuxd?
-		switch (socket_resp.message) {
-			case QMUXD_MSG_RAW_QMI_CTL:
-				if (handle_control_resp(&socket_resp, (struct common_qmi_ctl *) payload)) return NULL;
-				break;
-			case QMUXD_MSG_WRITE_QMI_SDU:
-				if (handle_service_resp(&socket_resp, payload)) return NULL;
-				break;
-			default:
-				LOG("unknown/unsupported socket message %"PRIu32, socket_resp.message);
-				return NULL;
+		// even QMUXD_MSG_RAW_QMI_CTL comes back as an SDU message from service 0
+		if (hdr.message == QMUXD_MSG_WRITE_QMI_SDU) {
+			if (handle_qmuxd_response(&hdr, payload)) return NULL;
+		} else {
+			LOG("unknown/unsupported qmuxd message %"PRIu32, hdr.message);
+			return NULL;
 		}
 	}
 	return NULL;
 }
 
-err_t write_socket_msg(const struct socket_qmuxd_hdr *msg, const struct iovec payloadvec[static 2]) {
-	// TODO make the payloadvec cleaner?
-	LOG("[%"PRIu32"]>: %"PRIu32, msg->transaction, msg->message);
-
-	if (msg->len < sizeof(*msg)) {
-		LOG("invalid length %"PRIu32, msg->len);
-		return EINVAL;
-	}
-
-	// qmuxd throws an error if we do individual write() calls, so writev
-	const struct iovec iov[] = {
-		IOV( (void*)msg, sizeof(*msg) ),
-		payloadvec[0],
-		payloadvec[1],
-	};
-
-	if (!writevall(g_qmuxd_socket, iov, sizeof(iov)/sizeof(iov[0]))) return errno;
-
-	return 0;
-}
-
-err_t read_socket_msg(struct socket_qmuxd_hdr *msg, uint8_t *payload, size_t payload_buf_size) {
+err_t read_qmuxd_msg(struct qmuxd_hdr *hdr, uint8_t *payload, size_t payload_buf_size) {
 	// TODO readv() ?
-	if (!readall(g_qmuxd_socket, &msg->len, sizeof(msg->len))) return errno;
-	if (msg->len < sizeof(*msg)) {
-		LOG("short length given: %"PRIu32, msg->len);
+	if (!readall(g_qmuxd_socket, &hdr->len, sizeof(hdr->len))) return errno;
+	if (hdr->len < sizeof(*hdr)) {
+		LOG("short length given: %"PRIu32, hdr->len);
 		return EINVAL;
 	}
-	if (!readall(g_qmuxd_socket, &(msg->len) + 1, sizeof(*msg) - sizeof(msg->len))) return errno;
-	if (msg->len > sizeof(*msg)) {
+	if (!readall(g_qmuxd_socket, &(hdr->len) + 1, sizeof(*hdr) - sizeof(hdr->len))) return errno;
+	if (hdr->len > sizeof(*hdr)) {
 		if (!payload) {
 			LOG("payload given, but no place to store it");
 			return EOVERFLOW;
 		}
-		size_t sz = msg->len - sizeof(*msg);
+		size_t sz = hdr->len - sizeof(*hdr);
 		if (sz > payload_buf_size) {
 			LOG("payload too big for buffer");
 			return EOVERFLOW;
 		}
-		LOG("reading payload of size %zu", sz);
 		if (!readall(g_qmuxd_socket, payload, sz)) return errno;
 	}
 
 	return 0;
 }
 
-err_t write_serial_response(struct serial_qmux *qmux, union qmi_ctl_or_svc *msg, const uint8_t *payload,
-							size_t payload_len) {
-	// TODO writev() in one?
-	uint8_t frame = 1;
-	if (!writeall(g_serialfd, &frame, sizeof(frame))) return errno;
-	if (!writeall(g_serialfd, qmux, sizeof(*qmux))) return errno;
-	if (!writeall(g_serialfd, msg, qmux->len - sizeof(*qmux) - payload_len)) return errno;
-	if (payload_len) {
-		if (!payload) {
-			LOG("payload specified but not given");
-			return EINVAL;
-		}
-		if (!writeall(g_serialfd, payload, payload_len)) return errno;
-	}
-
-	return 0;
-}
-
-err_t
-read_serial_msg(struct serial_qmux *qmux, union qmi_ctl_or_svc *msg, uint8_t *payload, size_t payload_buf_size) {
+err_t read_serial_msg(struct serial_hdr *hdr, union qmi_ctl_or_svc *msg, uint8_t *payload, size_t payload_buf_size) {
+	// TODO readv() ?
 	uint8_t frame;
 	if (!readall(g_serialfd, &frame, sizeof(frame))) return errno;
 	if (frame != 1) {
@@ -331,9 +288,9 @@ read_serial_msg(struct serial_qmux *qmux, union qmi_ctl_or_svc *msg, uint8_t *pa
 		return EINVAL;
 	}
 
-	if (!readall(g_serialfd, qmux, sizeof(*qmux))) return errno;
+	if (!readall(g_serialfd, hdr, sizeof(*hdr))) return errno;
 	size_t payload_len;
-	if (qmux->service == 0) {
+	if (hdr->service == 0) {
 		if (!readall(g_serialfd, &msg->ctl, sizeof(msg->ctl))) return errno;
 		payload_len = msg->ctl.payload_len;
 	} else {
@@ -350,7 +307,6 @@ read_serial_msg(struct serial_qmux *qmux, union qmi_ctl_or_svc *msg, uint8_t *pa
 			LOG("payload too big for buffer");
 			return EOVERFLOW;
 		}
-		LOG("reading payload of size %zu", payload_len);
 		if (!readall(g_serialfd, payload, payload_len)) return errno;
 	}
 
@@ -400,7 +356,7 @@ int main(__unused int argc, __unused char *argv[]) {
 	LOG("connected to qmuxd and received client id %"PRIu32, g_qmuxd_client_id);
 
 	pthread_t socket_read_thread;
-	pthread_create(&socket_read_thread, NULL, socket_read_loop, NULL);
+	pthread_create(&socket_read_thread, NULL, qmuxd_read_loop, NULL);
 
 	g_serialfd = posix_openpt(O_RDWR | O_NOCTTY);
 	if (g_serialfd < 0) {
