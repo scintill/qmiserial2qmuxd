@@ -1,20 +1,20 @@
 /*
  * Copyright (C) 2017 Joey Hewitt <joey@joeyhewitt.com>
  *
- * This file is part of qmiserial2socket.
+ * This file is part of qmiserial2qmuxd.
  *
- * qmiserial2socket is free software: you can redistribute it and/or modify
+ * qmiserial2qmuxd is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * qmiserial2socket is distributed in the hope that it will be useful,
+ * qmiserial2qmuxd is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with qmiserial2socket.  If not, see <http://www.gnu.org/licenses/>.
+ * along with qmiserial2qmuxd.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 // for lack of better name, "serial" is the type of interface exposed by qmi_wwan, and "socket" is the socket exposed by qmuxd.
