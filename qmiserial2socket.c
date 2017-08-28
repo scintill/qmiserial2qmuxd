@@ -18,7 +18,6 @@
  */
 
 // for lack of better name, "serial" is the type of interface exposed by qmi_wwan, and "socket" is the socket exposed by qmuxd.
-// the qmuxd transaction id is wider than the serial one, so we pass it through with casting, and don't need to have our own bookkeeping
 // TODO check if stuff like indications work
 
 /*
@@ -55,11 +54,7 @@ typedef _Bool bool_t;
 typedef int err_t;
 #define strerr_t(n) strerror(n)
 
-#define truncate_to(t, i) ((t)(i)) /* marker macro indicating it's expected that we're casting to a smaller type */
-
 #define LOG(fmt, ...) do { printf("%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__); } while(0)
-
-#define IOV(base, len) { .iov_base = (base), .iov_len = (len) }
 
 struct serial_hdr {
 	uint16_t len;
@@ -89,17 +84,19 @@ union qmi_ctl_or_svc {
 
 struct qmuxd_hdr { // from Gobi API struct sQMUXDHeader
 	uint32_t len;
-	uint32_t qmuxd_client; // qmuxd logs and Harald Welte's structs call this and the above members the "platform header"
+	uint32_t qmuxd_client; // qmuxd logs and Harald Welte's structs call this and the above member the "platform header"
 	uint32_t message;
 	uint32_t qmuxd_client_again;
-	uint32_t transaction;
+	uint16_t transaction;
+	uint8_t _unused1[2];
 	uint32_t sys_err;
 	uint32_t qmi_err; // duplicate of TLV 0x02, per Gobi API
 	uint32_t channel; // SMD channel, per Gobi API. TODO make configurable?
-	uint32_t service;
+	uint8_t service;
+	uint8_t _unused2[3];
 	uint8_t qmi_client;
 	uint8_t flags;
-	uint8_t _unused[2];
+	uint8_t _unused3[2];
 } __packed;
 
 enum qmuxd_message_type {
@@ -151,7 +148,7 @@ err_t send_qmuxd_request(struct serial_hdr *serial_hdr, union qmi_ctl_or_svc *ms
 	};
 
 	const struct iovec iov[] = {
-			IOV( &qmuxd_hdr, sizeof(qmuxd_hdr) ),
+			{ .iov_base = &qmuxd_hdr, .iov_len = sizeof(qmuxd_hdr) },
 			{ .iov_base = msg, .iov_len = msg_len},
 			{ .iov_base = msg_payload, .iov_len = payload_len},
 	};
@@ -167,7 +164,7 @@ err_t handle_qmuxd_response(struct qmuxd_hdr *qmuxd_hdr, const uint8_t *payload)
 
 	struct serial_hdr serial_hdr = {
 		.len = sizeof(serial_hdr) + (qmuxd_hdr->len - sizeof(*qmuxd_hdr)),
-		.service = truncate_to(uint8_t, qmuxd_hdr->service), .client = qmuxd_hdr->qmi_client,
+		.service = qmuxd_hdr->service, .client = qmuxd_hdr->qmi_client,
 		.flags = 0x80 // oFono and GobiNet check for this value without naming it; probably means it's a response
 	};
 
