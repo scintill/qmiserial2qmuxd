@@ -55,7 +55,6 @@ typedef _Bool bool_t;
 typedef int err_t;
 #define strerr_t(n) strerror(n)
 
-#define freex(p) { free(p); (p) = NULL; }
 #define truncate_to(t, i) ((t)(i)) /* marker macro indicating it's expected that we're casting to a smaller type */
 
 #define LOG(fmt, ...) do { printf("%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__); } while(0)
@@ -131,6 +130,9 @@ enum qmi_ctl_message {
 	QMI_CTL_GET_CLIENT_ID = 34,
 };
 
+// Gobi and qmuxd have this limit on what they'll send/receive. I'll assume it's a reasonable limit going the other way.
+#define MAX_QMI_MSG_SIZE 0x4100
+
 int g_qmuxd_socket;
 uint32_t g_qmuxd_client_id;
 int g_serialfd;
@@ -138,12 +140,13 @@ int g_serialfd;
 void init_socket_request(struct socket_qmuxd_hdr *req, uint8_t service, uint8_t qmi_client, uint16_t message,
 						 uint32_t transaction, uint16_t payload_len);
 err_t write_socket_msg(const struct socket_qmuxd_hdr *msg, const struct iovec payloadvec[2]);
-err_t read_socket_msg(struct socket_qmuxd_hdr *msg, uint8_t **ppayload);
+err_t read_socket_msg(struct socket_qmuxd_hdr *msg, uint8_t *payload, size_t payload_buf_size);
 
 void init_serial_ctl_response(struct serial_qmi_ctl *ctl, uint16_t message,
 							  uint16_t transaction, uint16_t payload_len);
 err_t write_serial_ctl_response(struct serial_qmi_ctl *ctl, const uint8_t *payload);
-err_t read_serial_msg(struct serial_qmux *qmux, union serial_qmi_ctl_or_svc *msg, uint8_t **payload);
+err_t
+read_serial_msg(struct serial_qmux *qmux, union serial_qmi_ctl_or_svc *msg, uint8_t *payload, size_t payload_buf_size);
 
 err_t write_serial_svc_response(uint8_t service, uint8_t client, const struct common_qmi_svc *svc, const uint8_t *payload) ;
 
@@ -276,18 +279,14 @@ void serial_read_loop() {
 	for (;;) {
 		struct serial_qmux qmux;
 		union serial_qmi_ctl_or_svc serial_req;
-		uint8_t *payload = NULL;
-		err_t err = read_serial_msg(&qmux, &serial_req, &payload);
+		uint8_t payload[MAX_QMI_MSG_SIZE];
+		err_t err = read_serial_msg(&qmux, &serial_req, payload, sizeof(payload));
 		if (err) {
 			LOG("error reading serial msg: %s", strerr_t(err));
 			return;
 		}
 		if (qmux.service == 0) {
-			if (handle_control_req(&serial_req.ctl, payload)) {
-				freex(payload);
-				return;
-			}
-			freex(payload);
+			if (handle_control_req(&serial_req.ctl, payload)) return;
 		} else {
 			if (handle_service_req(&qmux, &serial_req.svc, payload)) return;
 		}
@@ -297,27 +296,18 @@ void serial_read_loop() {
 void *socket_read_loop(void *arg __unused) {
 	for (;;) {
 		struct socket_qmuxd_hdr socket_resp;
-		uint8_t *payload = NULL;
-		err_t err = read_socket_msg(&socket_resp, &payload);
+		uint8_t payload[MAX_QMI_MSG_SIZE];
+		err_t err = read_socket_msg(&socket_resp, payload, sizeof(payload));
 		if (err) {
 			LOG("error reading socket msg: %s", strerr_t(err));
 			return NULL;
 		}
 		if (socket_resp.message == QMUXD_MSG_ALLOC_QMI_CLIENT_ID || socket_resp.message == QMUXD_MSG_RELEASE_QMI_CLIENT_ID) {
-			if (handle_control_resp(&socket_resp, payload)) {
-				freex(payload);
-				return NULL;
-			}
-			freex(payload);
+			if (handle_control_resp(&socket_resp, payload)) return NULL;
 		} else if (socket_resp.message == QMUXD_MSG_WRITE_QMI_SDU) {
-			if (handle_service_resp(&socket_resp, payload)) {
-				freex(payload);
-				return NULL;
-			}
-			freex(payload);
+			if (handle_service_resp(&socket_resp, payload)) return NULL;
 		} else {
 			LOG("unknown/unsupported socket message %"PRIu32, socket_resp.message);
-			freex(payload);
 		}
 	}
 	return NULL;
@@ -363,7 +353,7 @@ err_t write_socket_msg(const struct socket_qmuxd_hdr *msg, const struct iovec pa
 	return 0;
 }
 
-err_t read_socket_msg(struct socket_qmuxd_hdr *msg, uint8_t **ppayload) {
+err_t read_socket_msg(struct socket_qmuxd_hdr *msg, uint8_t *payload, size_t payload_buf_size) {
 	if (!readall(g_qmuxd_socket, &msg->len, sizeof(msg->len))) return errno;
 	if (msg->len < sizeof(*msg)) {
 		LOG("short length given: %"PRIu32, msg->len);
@@ -371,20 +361,17 @@ err_t read_socket_msg(struct socket_qmuxd_hdr *msg, uint8_t **ppayload) {
 	}
 	if (!readall(g_qmuxd_socket, &(msg->len) + 1, sizeof(*msg) - sizeof(msg->len))) return errno;
 	if (msg->len > sizeof(*msg)) {
-		if (!ppayload) {
+		if (!payload) {
 			LOG("payload given, but no place to store it");
 			return EOVERFLOW;
 		}
 		size_t sz = msg->len - sizeof(*msg);
-		LOG("reading payload of size %zu", sz);
-		*ppayload = malloc(sz);
-		if (!readall(g_qmuxd_socket, *ppayload, sz)) {
-			err_t err = errno;
-			freex(*ppayload);
-			return err;
+		if (sz > payload_buf_size) {
+			LOG("payload too big for buffer");
+			return EOVERFLOW;
 		}
-	} else {
-		if (ppayload) *ppayload = NULL;
+		LOG("reading payload of size %zu", sz);
+		if (!readall(g_qmuxd_socket, payload, sz)) return errno;
 	}
 
 	return 0;
@@ -430,13 +417,13 @@ err_t write_serial_svc_response(uint8_t service, uint8_t client, const struct co
 
 	struct serial_qmux qmux = {
 		.len = sizeof(struct serial_qmux) + sizeof(struct common_qmi_svc) + svc->payload_len,
-		.service = service, .client = client,
-		.flags = 0x80 // XXX oFono's code seems to check for this, but I don't know what it means
+		.service = service, .client = client, .flags = 0x80 // oFono and GobiNet check for this value
 	};
 	return write_serial_response_impl(&qmux, (union serial_qmi_ctl_or_svc *) svc, payload, svc->payload_len);
 }
 
-err_t read_serial_msg(struct serial_qmux *qmux, union serial_qmi_ctl_or_svc *msg, uint8_t **payload) {
+err_t
+read_serial_msg(struct serial_qmux *qmux, union serial_qmi_ctl_or_svc *msg, uint8_t *payload, size_t payload_buf_size) {
 	uint8_t frame;
 	if (!readall(g_serialfd, &frame, sizeof(frame))) return errno;
 	if (frame != 1) {
@@ -459,15 +446,12 @@ err_t read_serial_msg(struct serial_qmux *qmux, union serial_qmi_ctl_or_svc *msg
 			LOG("payload given, but no place to store it");
 			return EOVERFLOW;
 		}
-		LOG("reading payload of size %zu", payload_len);
-		*payload = malloc(payload_len);
-		if (!readall(g_serialfd, *payload, payload_len)) {
-			err_t err = errno;
-			freex(*payload);
-			return err;
+		if (payload_len > payload_buf_size) {
+			LOG("payload too big for buffer");
+			return EOVERFLOW;
 		}
-	} else {
-		if (payload) *payload = NULL;
+		LOG("reading payload of size %zu", payload_len);
+		if (!readall(g_serialfd, payload, payload_len)) return errno;
 	}
 
 	return 0;
