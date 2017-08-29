@@ -17,9 +17,6 @@
  * along with qmiserial2qmuxd.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-// for lack of better name, "serial" is the type of interface exposed by qmi_wwan, and "socket" is the socket exposed by qmuxd.
-// TODO check if stuff like indications work
-
 /*
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "OCUnusedGlobalDeclarationInspection"
