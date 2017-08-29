@@ -64,23 +64,24 @@ struct qmi_ctl { // format is common between serial and socket
 	uint8_t flags;
 	uint8_t transaction;
 	uint16_t message;
-	uint16_t payload_len;
 } __packed;
 
 struct qmi_svc { // format is common between serial and socket
 	uint8_t flags;
 	uint16_t transaction;
 	uint16_t message;
-	uint16_t payload_len;
 } __packed;
 
 union qmi_ctl_or_svc {
 	struct qmi_ctl ctl;
 	struct qmi_svc svc;
-};
+} __packed;
 
 struct qmuxd_hdr { // from Gobi API struct sQMUXDHeader
-	uint32_t len;
+	// Gobi API has a comment, "In QMUXD this struct is not packed", so I've downsized some of these members from what
+	// Gobi has, according to what I figure the actual size probably is.
+	uint16_t len;
+	uint8_t _unused4[2];
 	uint32_t qmuxd_client; // qmuxd logs and Harald Welte's structs call this and the above member the "platform header"
 	uint32_t message;
 	uint32_t qmuxd_client_again;
@@ -108,25 +109,19 @@ int g_qmuxd_socket;
 uint32_t g_qmuxd_client_id;
 int g_serialfd;
 
-err_t read_qmuxd_msg(struct qmuxd_hdr *hdr, uint8_t *payload, size_t payload_buf_size);
-err_t read_serial_msg(struct serial_hdr *hdr, union qmi_ctl_or_svc *msg, uint8_t *payload, size_t payload_buf_size);
-
 bool_t writeall(int fd, const void *buf, size_t len) ;
 bool_t writevall(int fd, const struct iovec *iov, int iovcnt) ;
 
-err_t send_qmuxd_request(struct serial_hdr *serial_hdr, union qmi_ctl_or_svc *msg, uint8_t *msg_payload) {
+err_t send_qmuxd_request(const struct serial_hdr *serial_hdr, const union qmi_ctl_or_svc *msg) {
 	uint16_t transaction;
 	uint16_t message;
-	size_t msg_len;
-	uint16_t payload_len;
 	uint32_t qmuxd_msg;
 
-#define EXTRACT(unionmember, qmuxdmsg) \
-	transaction = msg->unionmember.transaction; \
-	message = msg->unionmember.message; \
-	msg_len = sizeof(msg->unionmember); \
-	payload_len = msg->unionmember.payload_len; \
-	qmuxd_msg = qmuxdmsg;
+#define EXTRACT(unionmember, qmuxdmsg) do { \
+		transaction = msg->unionmember.transaction; \
+		message = msg->unionmember.message; \
+		qmuxd_msg = qmuxdmsg; \
+	} while(0)
 
 	if (serial_hdr->service == 0) {
 		EXTRACT(ctl, QMUXD_MSG_RAW_QMI_CTL);
@@ -138,7 +133,7 @@ err_t send_qmuxd_request(struct serial_hdr *serial_hdr, union qmi_ctl_or_svc *ms
 	LOG("[%"PRIu16"]< %"PRIu16" %"PRIu16, transaction, serial_hdr->service, message);
 
 	struct qmuxd_hdr qmuxd_hdr = {
-			.len = sizeof(struct qmuxd_hdr) + msg_len + payload_len,
+			.len = serial_hdr->len - sizeof(*serial_hdr) + sizeof(qmuxd_hdr),
 			.message = qmuxd_msg, .transaction = transaction,
 			.qmuxd_client = g_qmuxd_client_id, .qmuxd_client_again = g_qmuxd_client_id,
 			.service = serial_hdr->service, .qmi_client = serial_hdr->client,
@@ -146,8 +141,7 @@ err_t send_qmuxd_request(struct serial_hdr *serial_hdr, union qmi_ctl_or_svc *ms
 
 	const struct iovec iov[] = {
 			{ .iov_base = &qmuxd_hdr, .iov_len = sizeof(qmuxd_hdr) },
-			{ .iov_base = msg, .iov_len = msg_len},
-			{ .iov_base = msg_payload, .iov_len = payload_len},
+			{ .iov_base = (void *) msg, .iov_len = qmuxd_hdr.len - sizeof(qmuxd_hdr) },
 	};
 
 	if (!writevall(g_qmuxd_socket, iov, sizeof(iov)/sizeof(iov[0]))) return errno;
@@ -155,29 +149,21 @@ err_t send_qmuxd_request(struct serial_hdr *serial_hdr, union qmi_ctl_or_svc *ms
 	return 0;
 }
 
-err_t handle_qmuxd_response(struct qmuxd_hdr *qmuxd_hdr, const uint8_t *payload) {
+err_t handle_qmuxd_response(const struct qmuxd_hdr *qmuxd_hdr, const void *msg) {
 	LOG("[%"PRIu16", syserr=%"PRIu32", qmierr=%"PRIu32"]< %"PRIu16" %"PRIu16, qmuxd_hdr->transaction, qmuxd_hdr->service, qmuxd_hdr->message,
 		qmuxd_hdr->sys_err, qmuxd_hdr->qmi_err);
 
 	struct serial_hdr serial_hdr = {
-		.len = sizeof(serial_hdr) + (qmuxd_hdr->len - sizeof(*qmuxd_hdr)),
+		.len = qmuxd_hdr->len - sizeof(*qmuxd_hdr) + sizeof(serial_hdr),
 		.service = qmuxd_hdr->service, .client = qmuxd_hdr->qmi_client,
 		.flags = 0x80 // oFono and GobiNet check for this value without naming it; probably means it's a response
 	};
-
-	size_t payload_len = qmuxd_hdr->len - sizeof(*qmuxd_hdr);
 
 	// TODO writev() ?
 	uint8_t frame = 1;
 	if (!writeall(g_serialfd, &frame, sizeof(frame))) return errno;
 	if (!writeall(g_serialfd, &serial_hdr, sizeof(serial_hdr))) return errno;
-	if (payload_len) {
-		if (!payload) {
-			LOG("payload specified but not given");
-			return EINVAL;
-		}
-		if (!writeall(g_serialfd, payload, payload_len)) return errno;
-	}
+	if (!writeall(g_serialfd, msg, serial_hdr.len - sizeof(serial_hdr))) return errno;
 
 	return 0;
 }
@@ -215,94 +201,63 @@ bool_t writevall(int fd, const struct iovec *iov, int iovcnt) {
 	return 1;
 }
 
+err_t read_msg(int fd, bool_t expect_frame, void *msg, size_t msg_buf_size);
+
 void serial_read_loop() {
 	for (;;) {
-		struct serial_hdr hdr;
-		union qmi_ctl_or_svc msg;
-		uint8_t payload[MAX_QMI_MSG_SIZE];
-		err_t err = read_serial_msg(&hdr, &msg, payload, sizeof(payload));
+		union {
+			struct serial_hdr hdr;
+			uint8_t buf[MAX_QMI_MSG_SIZE];
+		} __packed packet;
+		err_t err = read_msg(g_serialfd, 1, &packet, sizeof(packet));
 		if (err) {
 			LOG("error reading serial msg: %s", strerr_t(err));
 			return;
 		}
-		if (send_qmuxd_request(&hdr, &msg, payload)) return;
+		if (send_qmuxd_request(&packet.hdr, (const union qmi_ctl_or_svc *) (&packet.hdr + 1))) return;
 	}
 }
 
 void *qmuxd_read_loop(void *_unused __unused) {
 	for (;;) {
-		struct qmuxd_hdr hdr;
-		uint8_t payload[MAX_QMI_MSG_SIZE];
-		err_t err = read_qmuxd_msg(&hdr, payload, sizeof(payload));
+		union {
+			struct qmuxd_hdr hdr;
+			uint8_t buf[MAX_QMI_MSG_SIZE];
+		} __packed packet;
+		err_t err = read_msg(g_qmuxd_socket, 0, &packet, sizeof(packet));
 		if (err) {
-			LOG("error reading socket msg: %s", strerr_t(err));
+			LOG("error reading qmuxd msg: %s", strerr_t(err));
 			return NULL;
 		}
 		// even QMUXD_MSG_RAW_QMI_CTL comes back as an SDU message from service 0
-		if (hdr.message == QMUXD_MSG_WRITE_QMI_SDU) {
-			if (handle_qmuxd_response(&hdr, payload)) return NULL;
-		} else {
-			LOG("unknown/unsupported qmuxd message %"PRIu32, hdr.message);
+		if (packet.hdr.message != QMUXD_MSG_WRITE_QMI_SDU) {
+			LOG("unknown/unsupported qmuxd message %"PRIu32, packet.hdr.message);
 			return NULL;
 		}
+		if (handle_qmuxd_response(&packet.hdr, &packet.hdr + 1)) return NULL;
 	}
 	return NULL;
 }
 
-err_t read_qmuxd_msg(struct qmuxd_hdr *hdr, uint8_t *payload, size_t payload_buf_size) {
-	// TODO readv() ?
-	if (!readall(g_qmuxd_socket, &hdr->len, sizeof(hdr->len))) return errno;
-	if (hdr->len < sizeof(*hdr)) {
-		LOG("short length given: %"PRIu32, hdr->len);
-		return EINVAL;
-	}
-	if (!readall(g_qmuxd_socket, &(hdr->len) + 1, sizeof(*hdr) - sizeof(hdr->len))) return errno;
-	if (hdr->len > sizeof(*hdr)) {
-		if (!payload) {
-			LOG("payload given, but no place to store it");
-			return EOVERFLOW;
+// Read data, optionally prefixed by a frame byte (discarded), then by a uint16_t containing the length of the following data + 2
+err_t read_msg(int fd, bool_t expect_frame, void *msg, size_t msg_buf_size) {
+	if (expect_frame) {
+		uint8_t frame;
+		if (!readall(fd, &frame, sizeof(frame))) return errno;
+		if (frame != 1) {
+			LOG("got invalid frame value: %"PRIu8, frame);
+			return EINVAL;
 		}
-		size_t sz = hdr->len - sizeof(*hdr);
-		if (sz > payload_buf_size) {
-			LOG("payload too big for buffer");
-			return EOVERFLOW;
-		}
-		if (!readall(g_qmuxd_socket, payload, sz)) return errno;
 	}
 
-	return 0;
-}
-
-err_t read_serial_msg(struct serial_hdr *hdr, union qmi_ctl_or_svc *msg, uint8_t *payload, size_t payload_buf_size) {
-	// TODO readv() ?
-	uint8_t frame;
-	if (!readall(g_serialfd, &frame, sizeof(frame))) return errno;
-	if (frame != 1) {
-		LOG("got invalid frame value: %"PRIu8, frame);
-		return EINVAL;
+	uint16_t *msg_ui16 = msg;
+	if (!readall(fd, msg_ui16, sizeof(*msg_ui16))) return errno;
+	uint16_t len = *msg_ui16;
+	if (len > msg_buf_size) {
+		LOG("message too big for buffer");
+		return EOVERFLOW;
 	}
-
-	if (!readall(g_serialfd, hdr, sizeof(*hdr))) return errno;
-	size_t payload_len;
-	if (hdr->service == 0) {
-		if (!readall(g_serialfd, &msg->ctl, sizeof(msg->ctl))) return errno;
-		payload_len = msg->ctl.payload_len;
-	} else {
-		if (!readall(g_serialfd, &msg->svc, sizeof(msg->svc))) return errno;
-		payload_len = msg->svc.payload_len;
-	}
-
-	if (payload_len) {
-		if (!payload) {
-			LOG("payload given, but no place to store it");
-			return EOVERFLOW;
-		}
-		if (payload_len > payload_buf_size) {
-			LOG("payload too big for buffer");
-			return EOVERFLOW;
-		}
-		if (!readall(g_serialfd, payload, payload_len)) return errno;
-	}
+	if (!readall(fd, &msg_ui16[1], len - sizeof(msg_ui16[0]))) return errno;
 
 	return 0;
 }

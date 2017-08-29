@@ -1,8 +1,8 @@
 # qmiserial2qmuxd
 
-This program's goal is to allow programs such as qmicli (libqmi), uqmi, and oFono to work with `qmuxd`. Usually such programs talk directly to a serial Qualcomm QMI interface (typically something like `/dev/cdc-wdm1` provided by `qmi_wwan` on Linux.) Some devices or configurations only have QMI access through `qmuxd`, a properietary Qualcomm daemon that provides QMI access through a separate protocol over Unix domain socket. So, `qmiserial2qmuxd` emulates the serial interface and proxies requests/responses to `qmuxd`, so that the standard opensource QMI tools can work in this configuration too.
+This program's goal is to allow programs such as qmicli (libqmi), uqmi, and oFono to work with `qmuxd`. Usually such programs talk directly to a serial Qualcomm QMI interface (typically something like `/dev/cdc-wdm1` provided by `qmi_wwan` on Linux.) Some devices or configurations only have QMI access through `qmuxd`, a properietary Qualcomm daemon that provides a separate protocol over Unix domain socket. So, `qmiserial2qmuxd` emulates the serial interface and proxies requests/responses to `qmuxd`, so that the standard opensource QMI tools can work in this configuration too.
 
-I've tested a few requests successfully with qmicli. I expect the others to work as well, but haven't tested, and haven't done heavy-duty or "real-world" use yet. The code probably needs to be made more robust and safe, but I think it's feature-complete, and the concept is simple enough that I hope there's little room for bugs.
+I've tested a few requests successfully on my Android phone (Samsung Galaxy S4 Mini) with qmicli. I expect other requests and devices to work as well, but haven't tested, and haven't done heavy-duty or "real-world" use yet. The code probably needs to be made more robust, safe, and convenient to use, but I think the basic function is feature-complete. The concept is simple enough that I hope there's little room for bugs.
 
 # Usage
 
@@ -17,7 +17,7 @@ main: connected to qmuxd and received client id 67
 /dev/pts/5
 ```
 
-Give that printed path to your QMI tool:
+Give that printed path to your QMI tool (this example should show your phone number):
 ```
 $ sudo qmicli -d /dev/pts/5 --dms-get-msisdn
 [/dev/pts/5] Device MSISDN retrieved:
@@ -72,5 +72,7 @@ Please let me know by Github issue or email if you have any questions or problem
 * Make qmuxd socket path configurable - maybe follow GobiAPI's naming convention. In the source right now it is defined for Android.
 * Check if indications/unsolicited messages work
 * Does anything bad happen if multiple programs access us at once? (Is this one of the reasons for the existence of qmuxd and libqmi's proxy mode?) We could set the pty to exclusive mode if needed.
+* Do endianness conversions, so we'll work on a big-endian system (assuming the wire protocols are always little-endian)
+* Write an implementation in something like Python? I've started with C because it's probably best for my needs, but a higher-level language might make it clearer how this works, and have less possibility of memory bugs and crashes.
 * Is there a good reason qmuxd wants you to do control operations through it? (e.g. eQMUXD_MSG_ALLOC_QMI_CLIENT_ID and eQMUXD_MSG_RELEASE_QMI_CLIENT_ID in GobiAPI, several others I see in libqmi_client_qmux.so.) I found a way to do raw control requests for simplicity, but maybe qmuxd wants us to use its extra layer so it can manage something important...
 * Add symlinking feature, where a user-specified symlink is created to point to the pty allocated, so that a constant path can be used with the consuming tools.
