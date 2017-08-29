@@ -387,7 +387,7 @@ int main(__unused int argc, __unused char *argv[]) {
 	}
 	printf("%s\n", serialdevname);
 
-	//kill(getppid(), SIGUSR1);
+	open(serialdevname, O_RDONLY); // so we don't get EIO when reading after a program closed it
 
 	serial_read_loop();
 
