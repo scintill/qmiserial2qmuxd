@@ -1,10 +1,10 @@
 # qmiserial2qmuxd
 
-This program's goal is to allow programs such as qmicli (libqmi), uqmi, and oFono to work with `qmuxd`. Usually such programs talk directly to a serial Qualcomm QMI interface (typically something like `/dev/cdc-wdm1` provided by `qmi_wwan` on Linux.) Some devices or configurations only have QMI access through `qmuxd`, a properietary Qualcomm daemon that provides a separate protocol over Unix domain socket. So, `qmiserial2qmuxd` emulates the serial interface and proxies requests/responses to `qmuxd`, so that the standard opensource QMI tools can work in this configuration too.
+This is a Linux/Android program to allow programs such as qmicli (libqmi), uqmi, and oFono to work with `qmuxd`. Usually such programs talk directly to a serial Qualcomm QMI interface (typically something like `/dev/cdc-wdm1` provided by `qmi_wwan` on Linux.) Some devices or configurations only have QMI access through `qmuxd`, a properietary Qualcomm daemon that provides a separate protocol over Unix domain socket. So, `qmiserial2qmuxd` emulates the serial interface and proxies requests/responses to `qmuxd`, so that the standard opensource QMI tools can work in this configuration too.
 
 I've tested a few requests successfully on my Android phone (Samsung Galaxy S4 Mini) with qmicli. I expect other requests and devices to work as well, but haven't tested, and haven't done heavy-duty or "real-world" use yet. The code probably needs to be made more robust, safe, and convenient to use, but I think the basic function is feature-complete. The concept is simple enough that I hope there's little room for bugs.
 
-# Usage
+# Usage (Linux PC, or if running both qmiserial2qmuxd and qmicli in Android)
 
 ```sh
 $ make qmiserial2qmuxd
@@ -19,7 +19,7 @@ main: connected to qmuxd and received client id 67
 
 Give that printed path to your QMI tool (this example should show your phone number):
 ```
-$ sudo qmicli -d /dev/pts/5 --dms-get-msisdn
+$ qmicli -d /dev/pts/5 --dms-get-msisdn
 [/dev/pts/5] Device MSISDN retrieved:
 	MSISDN: 'XXXXXXX'
 ```
@@ -33,6 +33,27 @@ $ ~/android-ndk/build/tools/make-standalone-toolchain.sh --arch=arm --install-di
 $ export PATH $PATH:$PWD/android-toolchain
 $ make qmiserial2qmuxd.android
 ```
+
+# Usage (Android)
+
+Requires `socat` on the host system. This is convoluted; until I figure out a better way, I recommend running qmicli on your device if possible.
+
+```sh
+$ adb root
+$ adb shell /data/local/tmp/qmiserial2qmuxd
+main: connected to qmuxd and received client id 47
+/dev/pts/2
+```
+
+Use the printed path, in another terminal:
+
+```sh
+$ adb forward localfilesystem:/tmp/qmiserial2qmuxd dev:/dev/pts/2
+$ socat PTY,link=/tmp/qmiserial2qmuxd.pty,rawer,wait-slave UNIX-CONNECT:/tmp/qmiserial2qmuxd &
+$ qmicli -d /tmp/qmiserial2qmuxd.pty --dms-get-msisdn
+```
+
+(You have to re-run `socat` after each invocation of `qmicli`.)
 
 # Design
 
