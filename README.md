@@ -2,9 +2,11 @@
 
 This is a Linux/Android program to allow programs such as qmicli (libqmi), uqmi, and oFono to work with `qmuxd`. Usually such programs talk directly to a serial Qualcomm QMI interface (typically something like `/dev/cdc-wdm1` provided by `qmi_wwan` on Linux.) Some devices or configurations only have QMI access through `qmuxd`, a properietary Qualcomm daemon that provides a separate protocol over Unix domain socket. So, `qmiserial2qmuxd` emulates the serial interface and proxies requests/responses to `qmuxd`, so that the standard opensource QMI tools can work in this configuration too.
 
-I've tested a few requests successfully on my Android phone (Samsung Galaxy S4 Mini) with qmicli. I expect other requests and devices to work as well, but haven't tested, and haven't done heavy-duty or "real-world" use yet. The code probably needs to be made more robust, safe, and convenient to use, but I think the basic function is feature-complete. The concept is simple enough that I hope there's little room for bugs.
+I've tested several requests successfully on my Android phone (Samsung Galaxy S4 Mini) with qmicli and uqmi. I expect other requests and devices to work as well, but haven't tested, and haven't done heavy-duty or "real-world" use yet. The code probably needs to be made more robust, safe, and convenient to use, but I think the basic function is feature-complete. The concept is simple enough that I hope there's little room for bugs.
 
-# Usage (Linux PC, or if running both qmiserial2qmuxd and qmicli in Android)
+# Usage (Linux PC, or if running both qmiserial2qmuxd and qmicli within Android)
+
+You may need to first edit the SOCKPATH define in qmiserial2qmuxd.c to match your qmuxd.
 
 ```sh
 $ make qmiserial2qmuxd
@@ -34,7 +36,7 @@ $ export PATH $PATH:$PWD/android-toolchain
 $ make qmiserial2qmuxd.android
 ```
 
-# Usage (Android)
+# Usage (Android over adb)
 
 Requires `socat` on the host system. This is convoluted; until I figure out a better way, I recommend running qmicli on your device if possible.
 
@@ -67,7 +69,7 @@ Please let me know by Github issue or email if you have any questions or problem
 
 * GobiAPI from https://portland.source.codeaurora.org/patches/quic/gobi/ (also included in libqmi source tree). Has qmuxd structs and logic, as well as the serial structs (e.g. struct sQMUXHeader), but they seem to be unused in it.
 * GobiNet from https://portland.source.codeaurora.org/patches/quic/gobi/Gobi_Linux/ (also included in this repository in the "aux/reference" branch). Has serial structs e.g. struct sQMUX and logic.
-* [libqmi](https://www.freedesktop.org/wiki/Software/libqmi/), [uqmi](git.openwrt.org/?p=project/uqmi.git;a=summary), and [oFono](https://01.org/ofono) (projects that are clients to the qmi_wwan serial interface)
+* [libqmi](https://www.freedesktop.org/wiki/Software/libqmi/), [uqmi](https://git.openwrt.org/?p=project/uqmi.git;a=summary), and [oFono](https://01.org/ofono) (projects that are clients to the qmi_wwan serial interface)
 * libqmi_client_qmux.so and qmuxd - properietary Qualcomm qmuxd client and server implementations
 * Look at qmuxd logs (`adb logcat -b radio` on Android)
 
