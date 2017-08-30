@@ -212,9 +212,9 @@ void serial_read_loop() {
 		err_t err = read_msg(g_serialfd, 1, &packet, sizeof(packet));
 		if (err) {
 			LOG("error reading serial msg: %s", strerr_t(err));
-			return;
+			exit(1);
 		}
-		if (send_qmuxd_request(&packet.hdr, (const union qmi_ctl_or_svc *) (&packet.hdr + 1))) return;
+		if (send_qmuxd_request(&packet.hdr, (const union qmi_ctl_or_svc *) (&packet.hdr + 1))) exit(1);
 	}
 }
 
@@ -227,14 +227,14 @@ void *qmuxd_read_loop(void *_unused __unused) {
 		err_t err = read_msg(g_qmuxd_socket, 0, &packet, sizeof(packet));
 		if (err) {
 			LOG("error reading qmuxd msg: %s", strerr_t(err));
-			return NULL;
+			exit(1);
 		}
 		// even QMUXD_MSG_RAW_QMI_CTL comes back as an SDU message from service 0
 		if (packet.hdr.message != QMUXD_MSG_WRITE_QMI_SDU) {
 			LOG("unknown/unsupported qmuxd message %"PRIu32, packet.hdr.message);
-			return NULL;
+			exit(1);
 		}
-		if (handle_qmuxd_response(&packet.hdr, &packet.hdr + 1)) return NULL;
+		if (handle_qmuxd_response(&packet.hdr, &packet.hdr + 1)) exit(1);
 	}
 	return NULL;
 }
