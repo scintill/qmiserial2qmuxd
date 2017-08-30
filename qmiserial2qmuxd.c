@@ -87,7 +87,7 @@ struct qmuxd_hdr { // from Gobi API struct sQMUXDHeader
 	uint32_t qmuxd_client_again;
 	uint16_t transaction;
 	uint8_t _unused1[2];
-	uint32_t sys_err;
+	int32_t sys_err;
 	uint32_t qmi_err; // duplicate of TLV 0x02, per Gobi API
 	uint32_t channel; // SMD channel, per Gobi API. TODO make configurable?
 	uint8_t service;
@@ -150,8 +150,19 @@ err_t send_qmuxd_request(const struct serial_hdr *serial_hdr, const union qmi_ct
 }
 
 err_t handle_qmuxd_response(const struct qmuxd_hdr *qmuxd_hdr, const void *msg) {
-	LOG("[%"PRIu16", syserr=%"PRIu32", qmierr=%"PRIu32"]< %"PRIu16" %"PRIu16, qmuxd_hdr->transaction, qmuxd_hdr->service, qmuxd_hdr->message,
-		qmuxd_hdr->sys_err, qmuxd_hdr->qmi_err);
+	LOG("[%"PRIu16", syserr=%"PRId32", qmierr=%"PRIu32", length=%zd]< %"PRIu16" %"PRIu16,
+		qmuxd_hdr->transaction, qmuxd_hdr->sys_err, qmuxd_hdr->qmi_err, qmuxd_hdr->len - sizeof(qmuxd_hdr),
+		qmuxd_hdr->message, qmuxd_hdr->service);
+
+	if (qmuxd_hdr->sys_err != 0) {
+		// XXX the message after the qmuxd hdr seems to be a bunch of 00, and I'm not sure of a useful way to pass it on to client.
+		// QMI-level errors will be in the TLV data in the message body and will be forwarded below.
+		LOG("qmuxd reports syserr; not forwarding to serial");
+		//tcflow(g_serialfd, TCIOFF);
+		// ^ This causes "QMI framing error detected" in qmicli - it's either sending a character,
+		// or maybe qmicli's line mode is set to interpret it as a char.
+		return 0;
+	}
 
 	struct serial_hdr serial_hdr = {
 		.len = qmuxd_hdr->len - sizeof(*qmuxd_hdr) + sizeof(serial_hdr),
