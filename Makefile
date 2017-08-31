@@ -4,7 +4,7 @@ LDFLAGS=-lutil -lpthread
 all: qmiserial2qmuxd
 
 qmiserial2qmuxd: qmiserial2qmuxd.o
-	$(CC) $(LDFLAGS) qmiserial2qmuxd.o -o $@
+	$(CC) qmiserial2qmuxd.o $(LDFLAGS) -o $@
 
 clean:
 	rm -f qmiserial2qmuxd qmiserial2qmuxd-android qmiserial2qmuxd.o
@@ -12,6 +12,6 @@ clean:
 qmiserial2qmuxd.android:
 	$(MAKE) $(MFLAGS) \
 		CC=arm-linux-androideabi-gcc \
-		CFLAGS="$(CFLAGS) -fPIE"\
-		LDFLAGS="-fPIE -pie" \
+		CFLAGS="$(CFLAGS) -fPIE -DANDROID"\
+		LDFLAGS="-fPIE -pie -llog" \
 		qmiserial2qmuxd

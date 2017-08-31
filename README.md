@@ -1,32 +1,12 @@
 # qmiserial2qmuxd
 
-This is a Linux/Android program to allow programs such as qmicli (libqmi), uqmi, and oFono to work with `qmuxd`. Usually such programs talk directly to a serial Qualcomm QMI interface (typically something like `/dev/cdc-wdm1` provided by `qmi_wwan` on Linux.) Some devices or configurations only have QMI access through `qmuxd`, a properietary Qualcomm daemon that provides a separate protocol over Unix domain socket. So, `qmiserial2qmuxd` emulates the serial interface and proxies requests/responses to `qmuxd`, so that the standard opensource QMI tools can work in this configuration too.
+This is a Linux/Android program to allow programs such as qmicli (libqmi), uqmi, and oFono to work with `qmuxd`. Usually such programs talk directly to a serial Qualcomm QMI interface (typically something like `/dev/cdc-wdm1` provided by `qmi_wwan` on Linux.) Some devices or configurations only have QMI access through `qmuxd`, a properietary Qualcomm daemon that provides a different protocol over local Unix socket. So, `qmiserial2qmuxd` emulates the serial interface and proxies requests/responses to `qmuxd`, so that the standard opensource QMI tools can work in this configuration too.
 
 I've tested several requests successfully on my Android phone (Samsung Galaxy S4 Mini) with qmicli and uqmi. I expect other requests and devices to work as well, but haven't tested, and haven't done heavy-duty or "real-world" use yet. The code probably needs to be made more robust, safe, and convenient to use, but I think the basic function is feature-complete. The concept is simple enough that I hope there's little room for bugs.
 
-# Usage (Linux PC, or if running both qmiserial2qmuxd and qmicli within Android)
+# Building for Android
 
 You may need to first edit the SOCKPATH define in qmiserial2qmuxd.c to match your qmuxd.
-
-```sh
-$ make qmiserial2qmuxd
-$ sudo ./qmiserial2qmuxd
-```
-
-Something like the following is output:
-```
-main: connected to qmuxd and received client id 67
-/dev/pts/5
-```
-
-Give that printed path to your QMI tool (this example should show your phone number):
-```
-$ qmicli -d /dev/pts/5 --dms-get-msisdn
-[/dev/pts/5] Device MSISDN retrieved:
-	MSISDN: 'XXXXXXX'
-```
-
-# Building for Android
 
 You can get an Android toolchain using the NDK, e.g.:
 
@@ -38,24 +18,20 @@ $ make qmiserial2qmuxd.android
 
 # Usage (Android over adb)
 
-Requires `socat` on the host system. This is convoluted; until I figure out a better way, I recommend running qmicli on your device if possible.
+Requires `socat` tool on the host system ("socat" package on Ubuntu.) You also need a relatively new adb version that supports proper piping of stdin/out. I've tested with adb 1.0.39 from the Android SDK (check version with `adb version`). From my glance at the Ubuntu sources, I think all current Ubuntu adb packages are too old!
+
+Paths and privilege escalation may need adjustment for your environment. If your adbd is running as root, you can leave out the `su radio` part.
 
 ```sh
-$ adb root
-$ adb shell /data/local/tmp/qmiserial2qmuxd
-main: connected to qmuxd and received client id 47
-/dev/pts/2
-```
-
-Use the printed path, in another terminal:
-
-```sh
-$ adb forward localfilesystem:/tmp/qmiserial2qmuxd dev:/dev/pts/2
-$ socat PTY,link=/tmp/qmiserial2qmuxd.pty,rawer,wait-slave UNIX-CONNECT:/tmp/qmiserial2qmuxd &
+$ socat PTY,link=/tmp/qmiserial2qmuxd.pty,cfmakeraw EXEC:"adb shell su radio /data/local/tmp/qmiserial2qmuxd"
 $ qmicli -d /tmp/qmiserial2qmuxd.pty --dms-get-msisdn
+[/dev/pts/5] Device MSISDN retrieved:
+	MSISDN: 'XXXXXXX'
 ```
 
-(You have to re-run `socat` after each invocation of `qmicli`.)
+Debug logs will be written to the Android log with tag "qmiserial2qmuxd" (view with `adb logcat -s qmiserial2qmuxd:D`)
+
+Note: in some tests I saw adb output about starting/killing its daemon getting into the pty and causing "QMI framing error detected" from qmicli. I think this final version of the command with latest adb doesn't have that issue, but in case it pops up for you, be aware.
 
 # Design
 
@@ -98,4 +74,3 @@ Please let me know by Github issue or email if you have any questions or problem
 * Do endianness conversions, so we'll work on a big-endian system (assuming the wire protocols are always little-endian)
 * Write an implementation in something like Python? I've started with C because it's probably best for my needs, but a higher-level language might make it clearer how this works, and have less possibility of memory bugs and crashes.
 * Is there a good reason qmuxd wants you to do control operations through it? (e.g. eQMUXD_MSG_ALLOC_QMI_CLIENT_ID and eQMUXD_MSG_RELEASE_QMI_CLIENT_ID in GobiAPI, several others I see in libqmi_client_qmux.so.) I found a way to do raw control requests for simplicity, but maybe qmuxd wants us to use its extra layer so it can manage something important...
-* Add symlinking feature, where a user-specified symlink is created to point to the pty allocated, so that a constant path can be used with the consuming tools.

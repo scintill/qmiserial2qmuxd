@@ -22,10 +22,6 @@
 #pragma ide diagnostic ignored "OCUnusedGlobalDeclarationInspection"
 */
 
-#define _POSIX_SOURCE
-#define _XOPEN_SOURCE 600
-#define _GNU_SOURCE
-#define _BSD_SOURCE
 #include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -34,6 +30,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -49,9 +46,13 @@
 #endif
 typedef _Bool bool_t;
 typedef int err_t;
-#define strerr_t(n) strerror(n)
 
-#define LOG(fmt, ...) do { printf("%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__); } while(0)
+#ifdef ANDROID
+#include <android/log.h>
+#define LOG(fmt, ...) do { __android_log_print(ANDROID_LOG_DEBUG, "qmiserial2qmuxd", "%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__); } while(0)
+#else
+#define LOG(fmt, ...) do { fprintf(stderr, "%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__); } while(0)
+#endif
 
 struct serial_hdr {
 	uint16_t len;
@@ -107,7 +108,7 @@ enum qmuxd_message_type {
 
 int g_qmuxd_socket;
 uint32_t g_qmuxd_client_id;
-int g_serialfd;
+int g_serialfd_r, g_serialfd_w;
 
 bool_t writeall(int fd, const void *buf, size_t len) ;
 bool_t writevall(int fd, const struct iovec *iov, int iovcnt) ;
@@ -172,9 +173,9 @@ err_t handle_qmuxd_response(const struct qmuxd_hdr *qmuxd_hdr, const void *msg) 
 
 	// TODO writev() ?
 	uint8_t frame = 1;
-	if (!writeall(g_serialfd, &frame, sizeof(frame))) return errno;
-	if (!writeall(g_serialfd, &serial_hdr, sizeof(serial_hdr))) return errno;
-	if (!writeall(g_serialfd, msg, serial_hdr.len - sizeof(serial_hdr))) return errno;
+	if (!writeall(g_serialfd_w, &frame, sizeof(frame))) return errno;
+	if (!writeall(g_serialfd_w, &serial_hdr, sizeof(serial_hdr))) return errno;
+	if (!writeall(g_serialfd_w, msg, serial_hdr.len - sizeof(serial_hdr))) return errno;
 
 	return 0;
 }
@@ -220,9 +221,9 @@ void serial_read_loop() {
 			struct serial_hdr hdr;
 			uint8_t buf[MAX_QMI_MSG_SIZE];
 		} __packed packet;
-		err_t err = read_msg(g_serialfd, 1, &packet, sizeof(packet));
+		err_t err = read_msg(g_serialfd_r, 1, &packet, sizeof(packet));
 		if (err) {
-			LOG("error reading serial msg: %s", strerr_t(err));
+			LOG("error reading serial msg: %s", strerror(err));
 			exit(1);
 		}
 		if (send_qmuxd_request(&packet.hdr, (const union qmi_ctl_or_svc *) (&packet.hdr + 1))) exit(1);
@@ -237,7 +238,7 @@ void *qmuxd_read_loop(void *_unused __unused) {
 		} __packed packet;
 		err_t err = read_msg(g_qmuxd_socket, 0, &packet, sizeof(packet));
 		if (err) {
-			LOG("error reading qmuxd msg: %s", strerr_t(err));
+			LOG("error reading qmuxd msg: %s", strerror(err));
 			exit(1);
 		}
 		// even QMUXD_MSG_RAW_QMI_CTL comes back as an SDU message from service 0
@@ -283,6 +284,7 @@ err_t open_qmuxd_socket() {
 	int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sockfd < 0) return errno;
 
+	// Following the Gobi API. I don't know the significance of the client name, but qmuxd won't connect if it can't stat() the path
 	struct sockaddr_un sockaddr = { .sun_family = AF_UNIX };
 	snprintf(sockaddr.sun_path, sizeof(sockaddr.sun_path), "%sqmux_client_socket%7lu", SOCKPATH, (unsigned long)getpid());
 	unlink(sockaddr.sun_path);
@@ -298,6 +300,8 @@ err_t open_qmuxd_socket() {
 
 	g_qmuxd_socket = sockfd;
 
+	LOG("connected to qmuxd and received client id %"PRIu32, g_qmuxd_client_id);
+
 	return 0;
 
 close_and_return_errno:
@@ -309,27 +313,19 @@ close_and_return_errno:
 int main(__unused int argc, __unused char *argv[]) {
 	err_t err;
 	if ((err = open_qmuxd_socket())) {
-		LOG("error opening/connecting to qmux: %s", strerr_t(err));
+		LOG("error opening/connecting to qmux: %s", strerror(err));
 		return 1;
 	}
 
-	LOG("connected to qmuxd and received client id %"PRIu32, g_qmuxd_client_id);
-
-	pthread_t socket_read_thread;
-	pthread_create(&socket_read_thread, NULL, qmuxd_read_loop, NULL);
-
-	g_serialfd = posix_openpt(O_RDWR | O_NOCTTY);
-	if (g_serialfd < 0) {
-		LOG("error opening pty: %s", strerror(errno));
-		return 1;
-	}
-
-	// put pty in raw mode - without this the second request would come in ASCII caret notation, among other issues I'm sure
+#ifdef ANDROID
+	// Put tty in raw mode - without this we get ASCII caret notation garbage, among other issues I'm sure.
 	struct termios termp;
-	if (tcgetattr(g_serialfd, &termp) < 0 || !(cfmakeraw(&termp), 1) || tcsetattr(g_serialfd, TCSANOW, &termp) < 0) {
-		LOG("error setting pty to raw mode: %s", strerror(errno));
-		return 1;
+	int ttyfd = open("/dev/tty", O_RDWR);
+	if (tcgetattr(ttyfd, &termp) < 0 || !(cfmakeraw(&termp), 1) || tcsetattr(ttyfd, TCSANOW, &termp) < 0) {
+		LOG("error setting tty to raw mode: %s", strerror(errno));
+		return errno;
 	}
+	close(ttyfd);
 	/*
 	 * XXX
 	 * "Note  that  tcsetattr() returns success if any of the requested changes could be successfully carried out.
@@ -337,20 +333,16 @@ int main(__unused int argc, __unused char *argv[]) {
 	 * to check that all changes have been performed successfully." - man page
 	 * That looks like a pain, so I'm not doing it for now...
 	 */
+#endif
 
-	if (grantpt(g_serialfd) < 0 || unlockpt(g_serialfd) < 0) {
-		LOG("error unlocking pty: %s", strerror(errno));
+	g_serialfd_r = STDIN_FILENO;
+	g_serialfd_w = STDOUT_FILENO;
+
+	pthread_t socket_read_thread;
+	if ((err = pthread_create(&socket_read_thread, NULL, qmuxd_read_loop, NULL))) {
+		LOG("error creating socket read thread: %s", strerror(err));
 		return 1;
 	}
-
-	char serialdevname[256];
-	if (ptsname_r(g_serialfd, serialdevname, sizeof(serialdevname))) {
-		LOG("error getting pty name: %s", strerror(errno));
-		return 1;
-	}
-	printf("%s\n", serialdevname);
-
-	open(serialdevname, O_RDONLY); // so we don't get EIO when reading after a program closed it
 
 	serial_read_loop();
 
