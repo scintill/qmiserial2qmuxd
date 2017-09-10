@@ -40,6 +40,7 @@
 #include <sys/ioctl.h>
 #include <sys/uio.h>
 #include <termio.h>
+#include <sys/stat.h>
 
 #ifndef __packed
 #define __packed  __attribute__ ((__packed__))
@@ -51,7 +52,8 @@ typedef _Bool bool_t;
 typedef int err_t;
 #define strerr_t(n) strerror(n)
 
-#define LOG(fmt, ...) do { printf("%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__); } while(0)
+#include <log/log.h>
+#define LOG(fmt, ...) do { __android_log_buf_print(LOG_ID_RADIO, ANDROID_LOG_DEBUG, "qmiserial2qmuxd", "%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__); } while(0)
 
 struct serial_hdr {
 	uint16_t len;
@@ -274,6 +276,7 @@ err_t read_msg(int fd, bool_t expect_frame, void *msg, size_t msg_buf_size) {
 }
 
 #define SOCKPATH "/dev/socket/qmux_radio/" // TODO make configurable?
+#define SERIALDEVLINK "/data/misc/radio/qmiserial"
 
 err_t open_qmuxd_socket() {
 	int ret;
@@ -348,7 +351,19 @@ int main(__unused int argc, __unused char *argv[]) {
 		LOG("error getting pty name: %s", strerror(errno));
 		return 1;
 	}
-	printf("%s\n", serialdevname);
+
+	struct stat sstat;
+	if (lstat(SERIALDEVLINK, &sstat) == 0) {
+		if (!S_ISLNK(sstat.st_mode)) {
+			LOG("looks like path already exists, and isn't a link! not overwriting");
+			return 1;
+		}
+		unlink(SERIALDEVLINK);
+	}
+	if (symlink(serialdevname, SERIALDEVLINK) < 0) {
+		LOG("error symlinking to pty: %s", strerror(errno));
+		return 1;
+	}
 
 	open(serialdevname, O_RDONLY); // so we don't get EIO when reading after a program closed it
 
