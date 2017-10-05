@@ -41,6 +41,7 @@
 #include <sys/uio.h>
 #include <termio.h>
 #include <sys/stat.h>
+#include <string.h>
 
 #ifndef __packed
 #define __packed  __attribute__ ((__packed__))
